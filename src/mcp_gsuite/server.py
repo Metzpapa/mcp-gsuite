@@ -114,12 +114,18 @@ def get_tool_handler(name: str) -> toolhandler.ToolHandler | None:
 
 add_tool_handler(tools_gmail.QueryEmailsToolHandler())
 add_tool_handler(tools_gmail.GetEmailByIdToolHandler())
+add_tool_handler(tools_gmail.GetThreadToolHandler())
 add_tool_handler(tools_gmail.CreateDraftToolHandler())
+add_tool_handler(tools_gmail.SendEmailToolHandler())
 add_tool_handler(tools_gmail.DeleteDraftToolHandler())
 add_tool_handler(tools_gmail.ReplyEmailToolHandler())
 add_tool_handler(tools_gmail.GetAttachmentToolHandler())
 add_tool_handler(tools_gmail.BulkGetEmailsByIdsToolHandler())
 add_tool_handler(tools_gmail.BulkSaveAttachmentsToolHandler())
+add_tool_handler(tools_gmail.SearchAllAccountsToolHandler())
+add_tool_handler(tools_gmail.ModifyGmailLabelsToolHandler())
+add_tool_handler(tools_gmail.CreateGmailLabelToolHandler())
+add_tool_handler(tools_gmail.ListGmailLabelsToolHandler())
 
 add_tool_handler(tools_calendar.ListCalendarsToolHandler())
 add_tool_handler(tools_calendar.GetCalendarEventsToolHandler())
@@ -135,18 +141,23 @@ async def list_tools() -> list[Tool]:
 
 @app.call_tool()
 async def call_tool(name: str, arguments: Any) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
-    try:        
+    try:
         if not isinstance(arguments, dict):
             raise RuntimeError("arguments must be dictionary")
-        
-        if toolhandler.USER_ID_ARG not in arguments:
-            raise RuntimeError("user_id argument is missing in dictionary.")
-
-        setup_oauth2(user_id=arguments.get(toolhandler.USER_ID_ARG, ""))
 
         tool_handler = get_tool_handler(name)
         if not tool_handler:
             raise ValueError(f"Unknown tool: {name}")
+
+        if tool_handler.requires_user_id:
+            if toolhandler.USER_ID_ARG not in arguments:
+                raise RuntimeError("user_id argument is missing in dictionary.")
+            setup_oauth2(user_id=arguments.get(toolhandler.USER_ID_ARG, ""))
+        else:
+            # Multi-account tools: setup all accounts so credentials are fresh
+            accounts = gauth.get_account_info()
+            for account in accounts:
+                setup_oauth2(user_id=account.email)
 
         return tool_handler.run_tool(arguments)
     except Exception as e:

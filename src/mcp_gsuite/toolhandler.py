@@ -13,6 +13,7 @@ USER_ID_ARG = "__user_id__"
 class ToolHandler():
     def __init__(self, tool_name: str):
         self.name = tool_name
+        self.requires_user_id = True
 
     def get_account_descriptions(self) -> list[str]:
         return [a.to_description() for a in gauth.get_account_info()]

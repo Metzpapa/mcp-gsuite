@@ -4,7 +4,7 @@ import logging
 import base64
 import traceback
 from email.mime.text import MIMEText
-from typing import Tuple
+from typing import Tuple, List
 
 
 class GmailService():
@@ -142,7 +142,7 @@ class GmailService():
         """
         try:
             # Ensure max_results is within API limits
-            max_results = min(max(1, max_results), 500)
+            max_results = min(max(1, int(max_results)), 500)
             
             # Get the list of messages
             result = self.service.users().messages().list(
@@ -169,7 +169,7 @@ class GmailService():
         except Exception as e:
             logging.error(f"Error reading emails: {str(e)}")
             logging.error(traceback.format_exc())
-            return []
+            raise
         
     def get_email_by_id_with_attachments(self, email_id: str) -> Tuple[dict, dict] | Tuple[None, dict]:
         """
@@ -189,6 +189,16 @@ class GmailService():
                 id=email_id
             ).execute()
             
+            # Mark as read (remove UNREAD label) since we're viewing it
+            if 'UNREAD' in message.get('labelIds', []):
+                try:
+                    self.service.users().messages().modify(
+                        userId='me', id=email_id,
+                        body={'removeLabelIds': ['UNREAD']}
+                    ).execute()
+                except Exception:
+                    pass  # Don't fail the read if marking fails
+
             # Parse the message with body included
             parsed_email = self._parse_message(txt=message, parse_body=True)
 
@@ -228,7 +238,7 @@ class GmailService():
         except Exception as e:
             logging.error(f"Error retrieving email {email_id}: {str(e)}")
             logging.error(traceback.format_exc())
-            return None, {}
+            raise
         
     def create_draft(self, to: str, subject: str, body: str, cc: list[str] | None = None) -> dict | None:
         """
@@ -254,13 +264,13 @@ class GmailService():
             if cc:
                 message['cc'] = ','.join(cc)
                 
-            # Create the message in MIME format
-            mime_message = MIMEText(body)
+            # Create the message in MIME format (utf-8 avoids 76-char line wrapping)
+            mime_message = MIMEText(body, _charset='utf-8')
             mime_message['to'] = to
             mime_message['subject'] = subject
             if cc:
                 mime_message['cc'] = ','.join(cc)
-                
+
             # Encode the message
             raw_message = base64.urlsafe_b64encode(mime_message.as_bytes()).decode('utf-8')
             
@@ -279,8 +289,43 @@ class GmailService():
         except Exception as e:
             logging.error(f"Error creating draft: {str(e)}")
             logging.error(traceback.format_exc())
-            return None
+            raise
         
+    def send_email(self, to: str, subject: str, body: str, cc: list[str] | None = None) -> dict | None:
+        """
+        Send an email message immediately.
+
+        Args:
+            to (str): Email address of the recipient
+            subject (str): Subject line of the email
+            body (str): Body content of the email
+            cc (list[str], optional): List of email addresses to CC
+
+        Returns:
+            dict: Sent message data if successful
+            None: If sending fails
+        """
+        try:
+            mime_message = MIMEText(body, _charset='utf-8')
+            mime_message['to'] = to
+            mime_message['subject'] = subject
+            if cc:
+                mime_message['cc'] = ','.join(cc)
+
+            raw_message = base64.urlsafe_b64encode(mime_message.as_bytes()).decode('utf-8')
+
+            result = self.service.users().messages().send(
+                userId='me',
+                body={'raw': raw_message}
+            ).execute()
+
+            return result
+
+        except Exception as e:
+            logging.error(f"Error sending email: {str(e)}")
+            logging.error(traceback.format_exc())
+            raise
+
     def delete_draft(self, draft_id: str) -> bool:
         """
         Delete a draft email message.
@@ -301,7 +346,7 @@ class GmailService():
         except Exception as e:
             logging.error(f"Error deleting draft {draft_id}: {str(e)}")
             logging.error(traceback.format_exc())
-            return False
+            raise
         
     def create_reply(self, original_message: dict, reply_body: str, send: bool = False, cc: list[str] | None = None) -> dict | None:
         """
@@ -327,24 +372,14 @@ class GmailService():
                 subject = f"Re: {subject}"
 
 
-            original_date = original_message.get('date', '')
-            original_from = original_message.get('from', '')
-            original_body = original_message.get('body', '')
-        
-            full_reply_body = (
-                f"{reply_body}\n\n"
-                f"On {original_date}, {original_from} wrote:\n"
-                f"> {original_body.replace('\n', '\n> ') if original_body else '[No message body]'}"
-            )
-
-            mime_message = MIMEText(full_reply_body)
+            mime_message = MIMEText(reply_body, _charset='utf-8')
             mime_message['to'] = to_address
             mime_message['subject'] = subject
             if cc:
                 mime_message['cc'] = ','.join(cc)
                 
-            mime_message['In-Reply-To'] = original_message.get('id', '')
-            mime_message['References'] = original_message.get('id', '')
+            mime_message['In-Reply-To'] = original_message.get('message_id', original_message.get('id', ''))
+            mime_message['References'] = original_message.get('message_id', original_message.get('id', ''))
             
             raw_message = base64.urlsafe_b64encode(mime_message.as_bytes()).decode('utf-8')
             
@@ -373,7 +408,7 @@ class GmailService():
         except Exception as e:
             logging.error(f"Error {'sending' if send else 'drafting'} reply: {str(e)}")
             logging.error(traceback.format_exc())
-            return None
+            raise
         
     def get_attachment(self, message_id: str, attachment_id: str) -> dict | None:
         """
@@ -401,4 +436,144 @@ class GmailService():
         except Exception as e:
             logging.error(f"Error retrieving attachment {attachment_id} from message {message_id}: {str(e)}")
             logging.error(traceback.format_exc())
-            return None
+            raise
+
+    def get_thread(self, thread_id: str, user_id: str) -> dict | None:
+        """
+        Fetch all messages in a thread by thread ID.
+
+        Args:
+            thread_id: The Gmail thread ID
+            user_id: The email address of the current account (used for direction detection)
+
+        Returns:
+            dict with threadId, message_count, messages list (each with direction),
+            last_message_from, last_message_direction, last_message_date
+            None if retrieval fails
+        """
+        try:
+            thread = self.service.users().threads().get(
+                userId='me',
+                id=thread_id,
+                format='full'
+            ).execute()
+
+            # Mark all unread messages in thread as read since we're viewing them
+            unread_ids = [
+                msg['id'] for msg in thread.get('messages', [])
+                if 'UNREAD' in msg.get('labelIds', [])
+            ]
+            for uid in unread_ids:
+                try:
+                    self.service.users().messages().modify(
+                        userId='me', id=uid,
+                        body={'removeLabelIds': ['UNREAD']}
+                    ).execute()
+                except Exception:
+                    pass  # Don't fail the read if marking fails
+
+            messages = []
+            user_id_lower = user_id.lower()
+
+            for msg in thread.get('messages', []):
+                parsed = self._parse_message(msg, parse_body=True)
+                if parsed:
+                    # Determine direction based on From address
+                    from_addr = parsed.get('from', '').lower()
+                    if user_id_lower in from_addr:
+                        parsed['direction'] = 'outbound'
+                    else:
+                        parsed['direction'] = 'inbound'
+                    messages.append(parsed)
+
+            if not messages:
+                return {'threadId': thread_id, 'message_count': 0, 'messages': []}
+
+            last = messages[-1]
+            return {
+                'threadId': thread_id,
+                'message_count': len(messages),
+                'messages': messages,
+                'last_message_from': last.get('from'),
+                'last_message_direction': last.get('direction'),
+                'last_message_date': last.get('date'),
+            }
+
+        except Exception as e:
+            logging.error(f"Error retrieving thread {thread_id}: {str(e)}")
+            logging.error(traceback.format_exc())
+            raise
+
+    def modify_labels(self, message_ids: List[str], add_label_ids: List[str] | None = None, remove_label_ids: List[str] | None = None) -> List[dict]:
+        """
+        Add/remove labels on one or more messages.
+
+        Args:
+            message_ids: List of Gmail message IDs to modify
+            add_label_ids: Label IDs to add (e.g., ['Label_123', 'STARRED'])
+            remove_label_ids: Label IDs to remove (e.g., ['UNREAD', 'INBOX'])
+
+        Returns:
+            List of result dicts with id and status for each message
+        """
+        results = []
+        body = {}
+        if add_label_ids:
+            body['addLabelIds'] = add_label_ids
+        if remove_label_ids:
+            body['removeLabelIds'] = remove_label_ids
+
+        for msg_id in message_ids:
+            try:
+                result = self.service.users().messages().modify(
+                    userId='me',
+                    id=msg_id,
+                    body=body
+                ).execute()
+                results.append({"id": msg_id, "status": "ok", "labelIds": result.get("labelIds", [])})
+            except Exception as e:
+                logging.error(f"Error modifying labels on {msg_id}: {str(e)}")
+                results.append({"id": msg_id, "status": "error", "error": str(e)})
+
+        return results
+
+    def create_label(self, name: str) -> dict | None:
+        """
+        Create a new Gmail label.
+
+        Args:
+            name: Label name (use '/' for nesting, e.g., 'Agent/Processed')
+
+        Returns:
+            dict with label id and name, or None on failure
+        """
+        try:
+            label = self.service.users().labels().create(
+                userId='me',
+                body={
+                    'name': name,
+                    'labelListVisibility': 'labelShow',
+                    'messageListVisibility': 'show'
+                }
+            ).execute()
+            return {"id": label['id'], "name": label['name']}
+        except Exception as e:
+            logging.error(f"Error creating label '{name}': {str(e)}")
+            logging.error(traceback.format_exc())
+            raise
+
+    def list_labels(self) -> List[dict]:
+        """
+        List all labels in the account.
+
+        Returns:
+            List of dicts with id, name, and type for each label
+        """
+        try:
+            results = self.service.users().labels().list(userId='me').execute()
+            labels = results.get('labels', [])
+            return [{"id": l['id'], "name": l['name'], "type": l.get('type', 'user')} for l in labels]
+        except Exception as e:
+            logging.error(f"Error listing labels: {str(e)}")
+            logging.error(traceback.format_exc())
+            raise

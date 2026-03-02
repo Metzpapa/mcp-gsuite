@@ -7,7 +7,9 @@ from mcp.types import (
     LoggingLevel,
 )
 from . import gmail
+from . import gauth
 import json
+import logging
 from . import toolhandler
 import base64
 
@@ -41,8 +43,7 @@ class QueryEmailsToolHandler(toolhandler.ToolHandler):
                             - 'from:example@gmail.com' for emails from a specific sender
                             - 'newer_than:2d' for emails from last 2 days
                             - 'has:attachment' for emails with attachments
-                            If not provided, returns recent emails without filtering.""",
-                        "required": False
+                            If not provided, returns recent emails without filtering."""
                     },
                     "max_results": {
                         "type": "integer",
@@ -121,6 +122,54 @@ class GetEmailByIdToolHandler(toolhandler.ToolHandler):
                 text=json.dumps(email, indent=2)
             )
         ]
+
+class GetThreadToolHandler(toolhandler.ToolHandler):
+    def __init__(self):
+        super().__init__("get_gmail_thread")
+
+    def get_tool_description(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description="Get all messages in an email thread by thread ID. Returns messages in chronological order with direction (inbound/outbound) and summary fields showing who sent the last message and whether the thread awaits a reply.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "__user_id__": self.get_user_id_arg_schema(),
+                    "thread_id": {
+                        "type": "string",
+                        "description": "The Gmail thread ID to retrieve"
+                    }
+                },
+                "required": ["thread_id", toolhandler.USER_ID_ARG]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "thread_id" not in args:
+            raise RuntimeError("Missing required argument: thread_id")
+
+        user_id = args.get(toolhandler.USER_ID_ARG)
+        if not user_id:
+            raise RuntimeError(f"Missing required argument: {toolhandler.USER_ID_ARG}")
+
+        gmail_service = gmail.GmailService(user_id=user_id)
+        thread = gmail_service.get_thread(args["thread_id"], user_id=user_id)
+
+        if thread is None:
+            return [
+                TextContent(
+                    type="text",
+                    text=f"Failed to retrieve thread with ID: {args['thread_id']}"
+                )
+            ]
+
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(thread, indent=2)
+            )
+        ]
+
 
 class BulkGetEmailsByIdsToolHandler(toolhandler.ToolHandler):
     def __init__(self):
@@ -248,6 +297,74 @@ class CreateDraftToolHandler(toolhandler.ToolHandler):
             )
         ]
 
+class SendEmailToolHandler(toolhandler.ToolHandler):
+    def __init__(self):
+        super().__init__("send_gmail_email")
+
+    def get_tool_description(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description="Sends a new email message immediately. Use create_gmail_draft if you want to save as draft instead. Use reply_gmail_email if you want to reply to an existing thread.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "__user_id__": self.get_user_id_arg_schema(),
+                    "to": {
+                        "type": "string",
+                        "description": "Email address of the recipient"
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Subject line of the email"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Body content of the email"
+                    },
+                    "cc": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Optional list of email addresses to CC"
+                    }
+                },
+                "required": ["to", "subject", "body", toolhandler.USER_ID_ARG]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        required = ["to", "subject", "body"]
+        if not all(key in args for key in required):
+            raise RuntimeError(f"Missing required arguments: {', '.join(required)}")
+
+        user_id = args.get(toolhandler.USER_ID_ARG)
+        if not user_id:
+            raise RuntimeError(f"Missing required argument: {toolhandler.USER_ID_ARG}")
+        gmail_service = gmail.GmailService(user_id=user_id)
+        result = gmail_service.send_email(
+            to=args["to"],
+            subject=args["subject"],
+            body=args["body"],
+            cc=args.get("cc")
+        )
+
+        if result is None:
+            return [
+                TextContent(
+                    type="text",
+                    text="Failed to send email"
+                )
+            ]
+
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )
+        ]
+
+
 class DeleteDraftToolHandler(toolhandler.ToolHandler):
     def __init__(self):
         super().__init__("delete_gmail_draft")
@@ -336,7 +453,7 @@ class ReplyEmailToolHandler(toolhandler.ToolHandler):
         gmail_service = gmail.GmailService(user_id=user_id)
         
         # First get the original message to extract necessary information
-        original_message = gmail_service.get_email_by_id(args["original_message_id"])
+        original_message, _ = gmail_service.get_email_by_id_with_attachments(args["original_message_id"])
         if original_message is None:
             return [
                 TextContent(
@@ -453,6 +570,88 @@ class GetAttachmentToolHandler(toolhandler.ToolHandler):
             )
         ]
 
+class SearchAllAccountsToolHandler(toolhandler.ToolHandler):
+    def __init__(self):
+        super().__init__("search_all_gmail_accounts")
+        self.requires_user_id = False
+
+    def get_tool_description(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description="""Search Gmail across ALL configured accounts in a single call.
+            Returns results grouped by account email address.
+            Accounts are dynamically loaded from configuration, so adding a new account automatically includes it.
+            Each account's results include the same metadata as query_gmail_emails (subject, from, to, date, snippet, labels, etc).
+            Use this instead of calling query_gmail_emails multiple times for each account.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": """Gmail search query. Examples:
+                            - 'from:someone@example.com' for emails from a specific sender
+                            - 'to:someone@example.com' for emails to a specific sender
+                            - 'subject:meeting' for emails with 'meeting' in subject
+                            - 'is:unread' for unread emails
+                            - 'newer_than:2d' for emails from last 2 days
+                            - 'has:attachment' for emails with attachments"""
+                    },
+                    "max_results_per_account": {
+                        "type": "integer",
+                        "description": "Maximum number of emails to retrieve per account (1-500, default: 50)",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "default": 50
+                    }
+                },
+                "required": ["query"]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        query = args.get("query")
+        if not query:
+            raise RuntimeError("Missing required argument: query")
+
+        max_results = args.get("max_results_per_account", 50)
+        accounts = gauth.get_account_info()
+
+        all_results = {}
+        errors = {}
+
+        for account in accounts:
+            try:
+                gmail_service = gmail.GmailService(user_id=account.email)
+                emails = gmail_service.query_emails(query=query, max_results=max_results)
+                if emails:
+                    all_results[account.email] = emails
+            except Exception as e:
+                logging.error(f"Error searching {account.email}: {str(e)}")
+                errors[account.email] = str(e)
+
+        output = {}
+        if all_results:
+            output["results"] = all_results
+        if errors:
+            output["errors"] = errors
+
+        total = sum(len(v) for v in all_results.values())
+        output["summary"] = {
+            "accounts_searched": len(accounts),
+            "accounts_with_results": len(all_results),
+            "total_results": total
+        }
+        if errors:
+            output["summary"]["accounts_with_errors"] = len(errors)
+
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(output, indent=2)
+            )
+        ]
+
+
 class BulkSaveAttachmentsToolHandler(toolhandler.ToolHandler):
     def __init__(self):
         super().__init__("bulk_save_gmail_attachments")
@@ -551,3 +750,136 @@ class BulkSaveAttachmentsToolHandler(toolhandler.ToolHandler):
                 continue
 
         return results
+
+
+class ModifyGmailLabelsToolHandler(toolhandler.ToolHandler):
+    def __init__(self):
+        super().__init__("modify_gmail_labels")
+
+    def get_tool_description(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description="""Add or remove labels on one or more Gmail messages. Handles all label operations:
+            - Mark as read: remove 'UNREAD'
+            - Mark as unread: add 'UNREAD'
+            - Archive: remove 'INBOX'
+            - Move to inbox: add 'INBOX'
+            - Star: add 'STARRED'
+            - Apply custom labels: add label ID (e.g., 'Label_123')
+            Use list_gmail_labels to find label IDs for custom labels.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "__user_id__": self.get_user_id_arg_schema(),
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of Gmail message IDs to modify"
+                    },
+                    "add_labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Label IDs to add (e.g., ['STARRED', 'Label_123'])"
+                    },
+                    "remove_labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Label IDs to remove (e.g., ['UNREAD', 'INBOX'])"
+                    }
+                },
+                "required": ["message_ids", toolhandler.USER_ID_ARG]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "message_ids" not in args:
+            raise RuntimeError("Missing required argument: message_ids")
+
+        user_id = args.get(toolhandler.USER_ID_ARG)
+        if not user_id:
+            raise RuntimeError(f"Missing required argument: {toolhandler.USER_ID_ARG}")
+
+        add_labels = args.get("add_labels")
+        remove_labels = args.get("remove_labels")
+        if not add_labels and not remove_labels:
+            raise RuntimeError("Must specify at least one of add_labels or remove_labels")
+
+        gmail_service = gmail.GmailService(user_id=user_id)
+        results = gmail_service.modify_labels(
+            message_ids=args["message_ids"],
+            add_label_ids=add_labels,
+            remove_label_ids=remove_labels
+        )
+
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(results, indent=2)
+            )
+        ]
+
+
+class CreateGmailLabelToolHandler(toolhandler.ToolHandler):
+    def __init__(self):
+        super().__init__("create_gmail_label")
+
+    def get_tool_description(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description="Create a new Gmail label. Use '/' for nesting (e.g., 'Agent/Processed'). Returns the label ID needed for modify_gmail_labels.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "__user_id__": self.get_user_id_arg_schema(),
+                    "name": {
+                        "type": "string",
+                        "description": "Label name (e.g., 'Agent/Processed')"
+                    }
+                },
+                "required": ["name", toolhandler.USER_ID_ARG]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        if "name" not in args:
+            raise RuntimeError("Missing required argument: name")
+
+        user_id = args.get(toolhandler.USER_ID_ARG)
+        if not user_id:
+            raise RuntimeError(f"Missing required argument: {toolhandler.USER_ID_ARG}")
+
+        gmail_service = gmail.GmailService(user_id=user_id)
+        result = gmail_service.create_label(args["name"])
+
+        if result is None:
+            return [TextContent(type="text", text=f"Failed to create label '{args['name']}'")]
+
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+class ListGmailLabelsToolHandler(toolhandler.ToolHandler):
+    def __init__(self):
+        super().__init__("list_gmail_labels")
+
+    def get_tool_description(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description="List all Gmail labels for an account. Returns label IDs, names, and types (system vs user). Use this to find label IDs for modify_gmail_labels.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "__user_id__": self.get_user_id_arg_schema()
+                },
+                "required": [toolhandler.USER_ID_ARG]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        user_id = args.get(toolhandler.USER_ID_ARG)
+        if not user_id:
+            raise RuntimeError(f"Missing required argument: {toolhandler.USER_ID_ARG}")
+
+        gmail_service = gmail.GmailService(user_id=user_id)
+        labels = gmail_service.list_labels()
+
+        return [TextContent(type="text", text=json.dumps(labels, indent=2))]
