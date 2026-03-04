@@ -23,6 +23,86 @@ def get_calendar_id_arg_schema() -> dict[str, str]:
     }
 
 
+class GetAllCalendarEventsToolHandler(toolhandler.ToolHandler):
+    def __init__(self):
+        super().__init__("get_all_calendar_events")
+        self.requires_user_id = False
+
+    def get_tool_description(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description="""Retrieves calendar events from ALL configured Google accounts in a single call.
+            Returns events grouped by account email address, sorted by start time within each account.
+            Use this instead of calling get_calendar_events multiple times for each account.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "time_min": {
+                        "type": "string",
+                        "description": "Start time in RFC3339 format (e.g. 2024-12-01T00:00:00Z). Defaults to current time if not specified."
+                    },
+                    "time_max": {
+                        "type": "string",
+                        "description": "End time in RFC3339 format (e.g. 2024-12-31T23:59:59Z). Optional."
+                    },
+                    "max_results_per_account": {
+                        "type": "integer",
+                        "description": "Maximum number of events per account (1-2500, default: 250)",
+                        "minimum": 1,
+                        "maximum": 2500,
+                        "default": 250
+                    }
+                },
+                "required": []
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        time_min = args.get("time_min")
+        time_max = args.get("time_max")
+        max_results = args.get("max_results_per_account", 250)
+
+        accounts = gauth.get_account_info()
+        all_results = {}
+        errors = {}
+
+        for account in accounts:
+            try:
+                calendar_service = calendar.CalendarService(user_id=account.email)
+                events = calendar_service.get_events(
+                    time_min=time_min,
+                    time_max=time_max,
+                    max_results=max_results,
+                )
+                if events:
+                    all_results[account.email] = events
+            except Exception as e:
+                logging.error(f"Error fetching calendar for {account.email}: {str(e)}")
+                errors[account.email] = str(e)
+
+        output = {}
+        if all_results:
+            output["results"] = all_results
+        if errors:
+            output["errors"] = errors
+
+        total = sum(len(v) for v in all_results.values())
+        output["summary"] = {
+            "accounts_searched": len(accounts),
+            "accounts_with_events": len(all_results),
+            "total_events": total
+        }
+        if errors:
+            output["summary"]["accounts_with_errors"] = len(errors)
+
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(output, indent=2)
+            )
+        ]
+
+
 class ListCalendarsToolHandler(toolhandler.ToolHandler):
     def __init__(self):
         super().__init__("list_calendars")
