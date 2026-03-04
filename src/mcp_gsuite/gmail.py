@@ -348,24 +348,23 @@ class GmailService():
             logging.error(traceback.format_exc())
             raise
         
-    def create_reply(self, original_message: dict, reply_body: str, send: bool = False, cc: list[str] | None = None) -> dict | None:
+    def create_reply(self, original_message: dict, reply_body: str, to: str, send: bool = False, cc: list[str] | None = None) -> dict | None:
         """
         Create a reply to an email message and either send it or save as draft.
-        
+
         Args:
             original_message (dict): The original message data (as returned by get_email_by_id)
             reply_body (str): Body content of the reply
+            to (str): Email address of the recipient
             send (bool): If True, sends the reply immediately. If False, saves as draft.
             cc (list[str], optional): List of email addresses to CC
-            
+
         Returns:
             dict: Sent message or draft data if successful
             None: If operation fails
         """
         try:
-            to_address = original_message.get('from')
-            if not to_address:
-                raise ValueError("Could not determine original sender's address")
+            to_address = to
             
             subject = original_message.get('subject', '')
             if not subject.lower().startswith('re:'):

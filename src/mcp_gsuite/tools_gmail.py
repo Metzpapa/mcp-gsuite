@@ -412,7 +412,7 @@ class ReplyEmailToolHandler(toolhandler.ToolHandler):
             name=self.name,
             description="""Creates a reply to an existing Gmail email message and either sends it or saves as draft.
 
-            Use this tool if you want to draft a reply. Use the 'cc' argument if you want to perform a "reply all".
+            You must specify the recipient with the 'to' argument. Threading is handled automatically via message headers.
             """,
             inputSchema={
                 "type": "object",
@@ -420,7 +420,11 @@ class ReplyEmailToolHandler(toolhandler.ToolHandler):
                     "__user_id__": self.get_user_id_arg_schema(),
                     "original_message_id": {
                         "type": "string",
-                        "description": "The ID of the Gmail message to reply to"
+                        "description": "The ID of the Gmail message to reply to (used for threading headers)"
+                    },
+                    "to": {
+                        "type": "string",
+                        "description": "Email address of the recipient"
                     },
                     "reply_body": {
                         "type": "string",
@@ -439,20 +443,20 @@ class ReplyEmailToolHandler(toolhandler.ToolHandler):
                         "description": "Optional list of email addresses to CC on the reply"
                     }
                 },
-                "required": ["original_message_id", "reply_body", toolhandler.USER_ID_ARG]
+                "required": ["original_message_id", "to", "reply_body", toolhandler.USER_ID_ARG]
             }
         )
 
     def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
-        if not all(key in args for key in ["original_message_id", "reply_body"]):
-            raise RuntimeError("Missing required arguments: original_message_id and reply_body")
+        if not all(key in args for key in ["original_message_id", "to", "reply_body"]):
+            raise RuntimeError("Missing required arguments: original_message_id, to, and reply_body")
 
         user_id = args.get(toolhandler.USER_ID_ARG)
         if not user_id:
             raise RuntimeError(f"Missing required argument: {toolhandler.USER_ID_ARG}")
         gmail_service = gmail.GmailService(user_id=user_id)
-        
-        # First get the original message to extract necessary information
+
+        # First get the original message to extract threading info
         original_message, _ = gmail_service.get_email_by_id_with_attachments(args["original_message_id"])
         if original_message is None:
             return [
@@ -466,6 +470,7 @@ class ReplyEmailToolHandler(toolhandler.ToolHandler):
         result = gmail_service.create_reply(
             original_message=original_message,
             reply_body=args.get("reply_body", ""),
+            to=args["to"],
             send=args.get("send", False),
             cc=args.get("cc")
         )
