@@ -888,3 +888,42 @@ class ListGmailLabelsToolHandler(toolhandler.ToolHandler):
         labels = gmail_service.list_labels()
 
         return [TextContent(type="text", text=json.dumps(labels, indent=2))]
+
+
+class UnsubscribeEmailToolHandler(toolhandler.ToolHandler):
+    def __init__(self):
+        super().__init__("unsubscribe_email")
+
+    def get_tool_description(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description="""Unsubscribe from a mailing list by extracting and acting on the List-Unsubscribe header.
+            Tries HTTPS POST (RFC 8058 one-click) first, then HTTPS GET, then mailto as fallback.
+            Works on most marketing/newsletter emails that follow CAN-SPAM requirements.
+            Returns the method used and whether it succeeded.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "__user_id__": self.get_user_id_arg_schema(),
+                    "message_id": {
+                        "type": "string",
+                        "description": "Gmail message ID to unsubscribe from"
+                    }
+                },
+                "required": ["message_id", toolhandler.USER_ID_ARG]
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        message_id = args.get("message_id")
+        if not message_id:
+            raise RuntimeError("Missing required argument: message_id")
+
+        user_id = args.get(toolhandler.USER_ID_ARG)
+        if not user_id:
+            raise RuntimeError(f"Missing required argument: {toolhandler.USER_ID_ARG}")
+
+        gmail_service = gmail.GmailService(user_id=user_id)
+        result = gmail_service.unsubscribe(message_id=message_id)
+
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]

@@ -1,8 +1,10 @@
-from googleapiclient.discovery import build 
+from googleapiclient.discovery import build
 from . import gauth
 import logging
 import base64
 import traceback
+import re
+import requests
 from email.mime.text import MIMEText
 from typing import Tuple, List
 
@@ -558,6 +560,126 @@ class GmailService():
             return {"id": label['id'], "name": label['name']}
         except Exception as e:
             logging.error(f"Error creating label '{name}': {str(e)}")
+            logging.error(traceback.format_exc())
+            raise
+
+    def unsubscribe(self, message_id: str) -> dict:
+        """
+        Unsubscribe from a mailing list by extracting and acting on the List-Unsubscribe header.
+
+        Tries HTTPS POST (RFC 8058 one-click) first, then HTTPS GET, then mailto as fallback.
+
+        Args:
+            message_id: Gmail message ID
+
+        Returns:
+            dict with method used, success status, and details
+        """
+        try:
+            # Fetch message with metadata to get List-Unsubscribe header
+            msg = self.service.users().messages().get(
+                userId='me',
+                id=message_id,
+                format='metadata',
+                metadataHeaders=['List-Unsubscribe', 'List-Unsubscribe-Post', 'From', 'Subject']
+            ).execute()
+
+            headers = msg.get('payload', {}).get('headers', [])
+            header_map = {h['name'].lower(): h['value'] for h in headers}
+
+            unsub_header = header_map.get('list-unsubscribe', '')
+            unsub_post = header_map.get('list-unsubscribe-post', '')
+            from_header = header_map.get('from', '')
+            subject_header = header_map.get('subject', '')
+
+            if not unsub_header:
+                return {
+                    'success': False,
+                    'method': None,
+                    'error': 'No List-Unsubscribe header found',
+                    'from': from_header,
+                    'subject': subject_header
+                }
+
+            # Parse URLs and mailto addresses from the header
+            # Format: <https://example.com/unsub>, <mailto:unsub@example.com>
+            urls = re.findall(r'<(https?://[^>]+)>', unsub_header)
+            mailtos = re.findall(r'<mailto:([^>]+)>', unsub_header)
+
+            # Try HTTPS POST first (RFC 8058 one-click unsubscribe)
+            if urls and unsub_post:
+                for url in urls:
+                    try:
+                        resp = requests.post(
+                            url,
+                            data='List-Unsubscribe=One-Click',
+                            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                            timeout=10,
+                            allow_redirects=True
+                        )
+                        if resp.status_code < 400:
+                            return {
+                                'success': True,
+                                'method': 'https_post_oneclick',
+                                'url': url,
+                                'status_code': resp.status_code,
+                                'from': from_header,
+                                'subject': subject_header
+                            }
+                    except requests.RequestException as e:
+                        logging.warning(f"POST unsubscribe failed for {url}: {e}")
+                        continue
+
+            # Try HTTPS GET as fallback
+            if urls:
+                for url in urls:
+                    try:
+                        resp = requests.get(url, timeout=10, allow_redirects=True)
+                        if resp.status_code < 400:
+                            return {
+                                'success': True,
+                                'method': 'https_get',
+                                'url': url,
+                                'status_code': resp.status_code,
+                                'from': from_header,
+                                'subject': subject_header
+                            }
+                    except requests.RequestException as e:
+                        logging.warning(f"GET unsubscribe failed for {url}: {e}")
+                        continue
+
+            # Mailto fallback: send an email to the unsubscribe address
+            if mailtos:
+                mailto_addr = mailtos[0].split('?')[0]  # Strip query params
+                try:
+                    mime_message = MIMEText('unsubscribe', _charset='utf-8')
+                    mime_message['to'] = mailto_addr
+                    mime_message['subject'] = 'unsubscribe'
+                    raw_message = base64.urlsafe_b64encode(mime_message.as_bytes()).decode('utf-8')
+                    self.service.users().messages().send(
+                        userId='me',
+                        body={'raw': raw_message}
+                    ).execute()
+                    return {
+                        'success': True,
+                        'method': 'mailto',
+                        'mailto': mailto_addr,
+                        'from': from_header,
+                        'subject': subject_header
+                    }
+                except Exception as e:
+                    logging.warning(f"Mailto unsubscribe failed for {mailto_addr}: {e}")
+
+            return {
+                'success': False,
+                'method': None,
+                'error': f'All unsubscribe methods failed. Header: {unsub_header}',
+                'from': from_header,
+                'subject': subject_header
+            }
+
+        except Exception as e:
+            logging.error(f"Error unsubscribing from message {message_id}: {str(e)}")
             logging.error(traceback.format_exc())
             raise
 

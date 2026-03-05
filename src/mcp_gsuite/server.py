@@ -126,6 +126,7 @@ add_tool_handler(tools_gmail.SearchAllAccountsToolHandler())
 add_tool_handler(tools_gmail.ModifyGmailLabelsToolHandler())
 add_tool_handler(tools_gmail.CreateGmailLabelToolHandler())
 add_tool_handler(tools_gmail.ListGmailLabelsToolHandler())
+add_tool_handler(tools_gmail.UnsubscribeEmailToolHandler())
 
 add_tool_handler(tools_calendar.GetAllCalendarEventsToolHandler())
 add_tool_handler(tools_calendar.ListCalendarsToolHandler())
