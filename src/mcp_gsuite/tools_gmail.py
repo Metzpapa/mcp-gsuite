@@ -890,6 +890,96 @@ class ListGmailLabelsToolHandler(toolhandler.ToolHandler):
         return [TextContent(type="text", text=json.dumps(labels, indent=2))]
 
 
+class FindThreadsAwaitingReplyToolHandler(toolhandler.ToolHandler):
+    def __init__(self):
+        super().__init__("find_threads_awaiting_reply")
+        self.requires_user_id = False
+
+    def get_tool_description(self) -> Tool:
+        return Tool(
+            name=self.name,
+            description="""Find inbox threads where someone else sent the last message (awaiting your reply).
+            Searches across ALL configured accounts. For each inbox thread, checks the full thread
+            (including sent messages outside inbox) to determine who sent the last message.
+            Returns only threads where the last message is inbound.
+            Does NOT mark any messages as read.""",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "exclude_senders": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Substrings to exclude from results (matched against From address, case-insensitive). E.g., ['notifications@breezeway.io', 'noreply@', 'calendar-notification']"
+                    },
+                    "max_threads_per_account": {
+                        "type": "integer",
+                        "description": "Max inbox messages to scan per account (default: 200)",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "default": 200
+                    }
+                },
+                "required": []
+            }
+        )
+
+    def run_tool(self, args: dict) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
+        exclude_senders = [s.lower() for s in args.get("exclude_senders", [])]
+        max_threads = args.get("max_threads_per_account", 200)
+        accounts = gauth.get_account_info()
+
+        all_results = {}
+        errors = {}
+        total_awaiting = 0
+
+        for account in accounts:
+            try:
+                gmail_service = gmail.GmailService(user_id=account.email)
+                thread_ids = gmail_service.list_inbox_thread_ids(max_results=max_threads)
+
+                awaiting = []
+                for tid in thread_ids:
+                    try:
+                        info = gmail_service.get_thread_direction(tid, user_id=account.email)
+                        if info and info['last_message_direction'] == 'inbound':
+                            # Check exclusions
+                            from_lower = info['last_message_from'].lower()
+                            if any(ex in from_lower for ex in exclude_senders):
+                                continue
+                            awaiting.append(info)
+                    except Exception as e:
+                        logging.error(f"Error checking thread {tid} on {account.email}: {str(e)}")
+                        continue
+
+                if awaiting:
+                    all_results[account.email] = awaiting
+                    total_awaiting += len(awaiting)
+            except Exception as e:
+                logging.error(f"Error scanning {account.email}: {str(e)}")
+                errors[account.email] = str(e)
+
+        output = {}
+        if all_results:
+            output["threads_awaiting_reply"] = all_results
+        if errors:
+            output["errors"] = errors
+
+        output["summary"] = {
+            "accounts_scanned": len(accounts),
+            "accounts_with_awaiting_threads": len(all_results),
+            "total_threads_awaiting_reply": total_awaiting,
+        }
+        if errors:
+            output["summary"]["accounts_with_errors"] = len(errors)
+
+        return [
+            TextContent(
+                type="text",
+                text=json.dumps(output, indent=2)
+            )
+        ]
+
+
 class UnsubscribeEmailToolHandler(toolhandler.ToolHandler):
     def __init__(self):
         super().__init__("unsubscribe_email")

@@ -683,6 +683,85 @@ class GmailService():
             logging.error(traceback.format_exc())
             raise
 
+    def list_inbox_thread_ids(self, max_results=200) -> list[str]:
+        """
+        List unique thread IDs from inbox without fetching message details.
+        Uses messages.list which returns id+threadId without individual message fetches.
+
+        Args:
+            max_results: Max messages to scan from inbox (default: 200)
+
+        Returns:
+            List of unique thread IDs (deduplicated, order preserved)
+        """
+        try:
+            result = self.service.users().messages().list(
+                userId='me',
+                maxResults=min(max(1, int(max_results)), 500),
+                q='in:inbox'
+            ).execute()
+            messages = result.get('messages', [])
+            seen = set()
+            thread_ids = []
+            for msg in messages:
+                tid = msg['threadId']
+                if tid not in seen:
+                    seen.add(tid)
+                    thread_ids.append(tid)
+            return thread_ids
+        except Exception as e:
+            logging.error(f"Error listing inbox thread IDs: {str(e)}")
+            logging.error(traceback.format_exc())
+            raise
+
+    def get_thread_direction(self, thread_id: str, user_id: str) -> dict | None:
+        """
+        Lightweight thread fetch that checks who sent the last message.
+        Uses metadata format (no body) and does NOT mark messages as read.
+
+        Args:
+            thread_id: The Gmail thread ID
+            user_id: The email address of the current account
+
+        Returns:
+            dict with thread summary and direction info, or None on failure
+        """
+        try:
+            thread = self.service.users().threads().get(
+                userId='me',
+                id=thread_id,
+                format='metadata',
+                metadataHeaders=['From', 'Subject', 'Date']
+            ).execute()
+
+            messages = thread.get('messages', [])
+            if not messages:
+                return None
+
+            last_msg = messages[-1]
+            last_headers = {h['name'].lower(): h['value']
+                           for h in last_msg.get('payload', {}).get('headers', [])}
+            from_addr = last_headers.get('from', '').lower()
+            direction = 'outbound' if user_id.lower() in from_addr else 'inbound'
+
+            first_headers = {h['name'].lower(): h['value']
+                            for h in messages[0].get('payload', {}).get('headers', [])}
+
+            return {
+                'threadId': thread_id,
+                'message_count': len(messages),
+                'subject': first_headers.get('subject', ''),
+                'last_message_from': last_headers.get('from', ''),
+                'last_message_date': last_headers.get('date', ''),
+                'last_message_direction': direction,
+                'last_message_snippet': last_msg.get('snippet', ''),
+            }
+
+        except Exception as e:
+            logging.error(f"Error getting thread direction for {thread_id}: {str(e)}")
+            logging.error(traceback.format_exc())
+            raise
+
     def list_labels(self) -> List[dict]:
         """
         List all labels in the account.
